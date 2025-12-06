@@ -2,10 +2,27 @@ from typing import Optional
 from Token import Token
 
 class ASTNode:
-    def __init__(self, type_, value=None, children=None):
+    def __init__(self, type_, value=None, children=None, token=None):
         self.type = type_
         self.value = value
         self.children = children or []
+        self.token = token
+        if token is not None:
+            self.line = getattr(token, "line", None)
+            self.column = getattr(token, "column", None)
+        else:
+            inherited_token = None
+            for ch in self.children:
+                if isinstance(ch, ASTNode) and getattr(ch, "token", None) is not None:
+                    inherited_token = ch.token
+                    break
+            if inherited_token is not None:
+                self.token = inherited_token
+                self.line = getattr(inherited_token, "line", None)
+                self.column = getattr(inherited_token, "column", None)
+            else:
+                self.line = None
+                self.column = None
 
     def __repr__(self, level=0):
         indent = "  " * level
@@ -80,7 +97,7 @@ class SimpleJavaParser:
 
     def _maybe_generic_suffix(self, base_type: str) -> str:
         """
-        Склеиваем 'List < String , Integer >' -> 'List<String,Integer>'.
+        'List < String , Integer >' -> 'List<String,Integer>'.
         """
         if not (self.current and getattr(self.current, "type", None) == "LT"):
             return base_type
@@ -100,9 +117,6 @@ class SimpleJavaParser:
         return "".join(out).replace(" ", "")
 
     def _is_constructor_start(self):
-        """
-        [modifiers]* IDENTIFIER '('  и имя == текущему классу
-        """
         if not self._current_class_name:
             return False
         i = 1
@@ -163,10 +177,10 @@ class SimpleJavaParser:
         self.match("CLASS")
         if self.current is None:
             raise SyntaxError("Ожидался идентификатор класса, получен EOF")
-        class_name = self.current.text
+        class_token = self.current
+        class_name = class_token.text
         self.match("IDENTIFIER")
 
-        # extends (одна база)
         bases = []
         if self.accept("EXTENDS"):
             if self.current and self.current.type == "IDENTIFIER":
@@ -212,10 +226,9 @@ class SimpleJavaParser:
 
         self.match("RBRACE")
 
-        node = ASTNode("ClassDecl", class_name, body_children)
+        node = ASTNode("ClassDecl", class_name, body_children, token=class_token)
         if modifiers:
             node.children.insert(0, ASTNode("Modifiers", ",".join(modifiers)))
-
         self._current_class_name = None
         return node
 
@@ -249,13 +262,11 @@ class SimpleJavaParser:
         while self.current and self.current.type in self.MODIFIERS:
             mods.append(self.current.type); self.advance()
 
-        # тип
         type_tok = None
         if self.current and (self.current.type in self.TYPE_KEYWORDS or self.current.type == "IDENTIFIER"):
             type_tok = self.current.text; self.advance()
             # generics
             type_tok = self._maybe_generic_suffix(type_tok)
-            # массивные скобки после типа
             while self.current and self.current.type == "LBRACK":
                 self.advance()
                 if self.current and self.current.type == "RBRACK":
@@ -272,7 +283,9 @@ class SimpleJavaParser:
         while True:
             if not (self.current and self.current.type == "IDENTIFIER"):
                 break
-            name = self.current.text; self.advance()
+            name_token = self.current
+            name = name_token.text
+            self.advance()
 
             init = None
             if self.accept("ASSIGN"):
@@ -316,12 +329,13 @@ class SimpleJavaParser:
                 fd_children.append(ASTNode("Modifiers", ",".join(mods)))
             if init is not None:
                 fd_children.append(ASTNode("Init", None, [init]))
-            decls.append(ASTNode("FieldDecl", f"{type_tok} {name}", fd_children))
+            decls.append(ASTNode("FieldDecl", f"{type_tok} {name}", fd_children, token=name_token))
 
             if self.current and self.current.type == "COMMA":
                 self.advance()
                 continue
             break
+
 
         if self.current and self.current.type == "SEMI":
             self.advance()
@@ -449,9 +463,12 @@ class SimpleJavaParser:
             else:
                 p_type = "<unknown>"; self.advance()
             p_name = None
+            name_token = None
             if self.current is not None and self.current.type == "IDENTIFIER":
-                p_name = self.current.text; self.advance()
-            params.append(ASTNode("Param", f"{p_type} {p_name}"))
+                name_token = self.current
+                p_name = name_token.text
+                self.advance()
+            params.append(ASTNode("Param", f"{p_type} {p_name}", token=name_token))
             if self.current is not None and self.current.type == "COMMA":
                 self.advance(); continue
             else:
@@ -529,33 +546,30 @@ class SimpleJavaParser:
                 self.advance()
             return ASTNode("Continue")
         if self.current.type == "RETURN":
+            tok = self.current
             self.advance()
             expr = None
             if self.current and self.current.type != "SEMI":
                 expr = self.parse_expression()
             if self.current and self.current.type == "SEMI":
                 self.advance()
-            return ASTNode("Return", children=[expr] if expr else [])
+            return ASTNode("Return", children=[expr] if expr else [], token=tok)
         if self.current.type == "LBRACE":
             stmts = self.parse_block()
             return ASTNode("Block", children=stmts)
 
-        # локальные объявления простых типов
         if self.current.type in self.TYPE_KEYWORDS:
             node = self.parse_field_declaration()
             return node
 
-        # локальные объявления пользовательских/дженерик типов
         if self.current.type == "IDENTIFIER" and self._looks_like_local_decl_start():
             node = self.parse_local_variable_declaration_no_semi()
             if self.current and self.current.type == "SEMI":
                 self.advance()
             return node
 
-        # выражение / присваивание / составное присваивание
         left = self.parse_expression()
 
-        # простое присваивание
         if self.current is not None and self.current.type == "ASSIGN":
             self.advance()
             right = self.parse_expression()
@@ -564,7 +578,6 @@ class SimpleJavaParser:
                 self.advance()
             return node
 
-        # составные присваивания
         compound = {
             "ADD_ASSIGN": "ADD",
             "SUB_ASSIGN": "SUB",
@@ -582,13 +595,11 @@ class SimpleJavaParser:
             op = compound[self.current.type]
             self.advance()
             rhs = self.parse_expression()
-            # превращаем `a <op>= b` в Assign( a , BinaryOp(<op>, [a, b]) )
             node = ASTNode("Assign", None, [left, ASTNode("BinaryOp", op, [left, rhs])])
             if self.current and self.current.type == "SEMI":
                 self.advance()
             return node
 
-        # точка с запятой после выражения
         if self.current and self.current.type == "SEMI":
             self.advance()
         return ASTNode("ExprStmt", None, [left])
@@ -646,7 +657,6 @@ class SimpleJavaParser:
         while True:
             if self.current is None:
                 break
-            # тернарный ?:  (низкий приоритет, право-ассоциативный)
             if self.current.type == "QUESTION":
                 self.advance()
                 texpr = self.parse_expression()
@@ -669,47 +679,48 @@ class SimpleJavaParser:
         if self.current is None:
             return ASTNode("Empty")
 
-        # префиксные унарные: ++ -- ! + - ~
         if self.current.type in ("INC", "DEC", "BANG", "ADD", "SUB", "TILDE"):
-            op = self.current.type
+            op_token = self.current
+            op = op_token.type
             self.advance()
             operand = self.parse_primary()
-            return ASTNode("PrefixOp", op, [operand])
+            return ASTNode("PrefixOp", op, [operand], token=op_token)
 
-        # ( ... )
         if self.current.type == "LPAREN":
             self.advance()
             expr = self.parse_expression()
             self.match("RPAREN")
             return expr
 
-        # числовые/строковые/символьные
         if self.current.type in ("NUMBER", "STRING", "CHAR"):
-            val = self.current.text
+            tok = self.current
+            val = tok.text
             self.advance()
-            return ASTNode("Literal", val)
+            return ASTNode("Literal", val, token=tok)
 
-        # булевы и null как литералы (если лексер выделяет их отдельными токенами)
         if self.current.type in ("TRUE", "FALSE", "NULL"):
-            lit = self.current.text
+            tok = self.current
+            lit = tok.text
             self.advance()
-            return ASTNode("Literal", lit)
+            return ASTNode("Literal", lit, token=tok)
 
-        # идентификатор/this/super, вызовы, член‑доступ, постфикс ++/--
         if self.current.type in ("IDENTIFIER", "THIS", "SUPER"):
-            name = self.current.text.lower() if self.current.type in ("THIS", "SUPER") else self.current.text
-            base = ASTNode("Identifier", name)
+            id_token = self.current
+            name = id_token.text.lower() if id_token.type in ("THIS", "SUPER") else id_token.text
+            base = ASTNode("Identifier", name, token=id_token)
             self.advance()
             while True:
                 if self.current is not None and self.current.type == "DOT":
                     self.advance()
                     if self.current and self.current.type == "IDENTIFIER":
-                        member_name = self.current.text
+                        member_tok = self.current
+                        member_name = member_tok.text
                         self.advance()
-                        base = ASTNode("Member", member_name, [base])
+                        base = ASTNode("Member", member_name, [base], token=member_tok)
                         continue
                     break
                 if self.current is not None and self.current.type == "LPAREN":
+                    call_tok = self.current
                     self.advance()
                     args = []
                     if self.current is not None and self.current.type != "RPAREN":
@@ -718,21 +729,22 @@ class SimpleJavaParser:
                             self.advance()
                             args.append(self.parse_expression())
                     self.match("RPAREN")
-                    base = ASTNode("Call", base, args)
+                    base = ASTNode("Call", base, args, token=call_tok)
                     continue
                 if self.current is not None and self.current.type in ("INC", "DEC"):
-                    op = self.current.type
+                    op_tok = self.current
+                    op = op_tok.type
                     self.advance()
-                    base = ASTNode("PostfixOp", op, [base])
+                    base = ASTNode("PostfixOp", op, [base], token=op_tok)
                     continue
                 break
             return base
 
-        # fallback
-        token_text = getattr(self.current, "text", None)
-        token_type = getattr(self.current, "type", None)
+        tok = self.current
+        token_text = getattr(tok, "text", None)
+        token_type = getattr(tok, "type", None)
         self.advance()
-        return ASTNode("Unknown", f"{token_type}:{token_text}")
+        return ASTNode("Unknown", f"{token_type}:{token_text}", token=tok)
 
     # --------------- while / do-while / for ---------------
     def parse_while_statement(self):
@@ -758,7 +770,6 @@ class SimpleJavaParser:
         self.match("FOR")
         self.match("LPAREN")
 
-        # ищем foreach (':' до первой ';')
         lookahead_index = 1
         found_colon = False
         while True:
@@ -781,16 +792,18 @@ class SimpleJavaParser:
                     if self.current and self.current.type == "RBRACK":
                         first_type = (first_type or "") + "[]"; self.advance()
             var_name = None
+            name_token = None
             if self.current.type == "IDENTIFIER":
-                var_name = self.current.text; self.advance()
+                name_token = self.current
+                var_name = name_token.text
+                self.advance()
             self.match("COLON")
             collection_expr = self.parse_expression()
             self.match("RPAREN")
             body = ASTNode("Block", children=self.parse_block())
-            var_node = ASTNode("Param", f"{first_type} {var_name}")
+            var_node = ASTNode("Param", f"{first_type} {var_name}", token=name_token)
             return ASTNode("ForStatement", children=[var_node, collection_expr, body])
 
-        # classic for
         init = None
         if self.current.type != "SEMI":
             if self.current.type in self.TYPE_KEYWORDS:
