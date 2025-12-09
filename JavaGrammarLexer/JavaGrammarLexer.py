@@ -10,7 +10,7 @@ class JavaGrammarLexer(Lexer):
         "char": "CHAR", "class": "CLASS", "continue": "CONTINUE",
         "default": "DEFAULT", "do": "DO", "else": "ELSE", "enum": "ENUM",
         "extends": "EXTENDS", "final": "FINAL", "finally": "FINALLY",
-        "float": "FLOAT", "for": "FOR", "if": "IF", "implements": "IMPLEMENTS",
+        "float": "FLOAT", "double": "DOUBLE", "for": "FOR", "if": "IF", "implements": "IMPLEMENTS",
         "import": "IMPORT", "instanceof": "INSTANCEOF", "int": "INT",
         "interface": "INTERFACE", "long": "LONG", "native": "NATIVE",
         "new": "NEW", "package": "PACKAGE", "private": "PRIVATE",
@@ -19,19 +19,19 @@ class JavaGrammarLexer(Lexer):
         "super": "SUPER", "switch": "SWITCH", "synchronized": "SYNCHRONIZED",
         "this": "THIS", "throw": "THROW", "throws": "THROWS",
         "transient": "TRANSIENT", "try": "TRY", "void": "VOID",
-        "volatile": "VOLATILE", "while": "WHILE"
+        "volatile": "VOLATILE", "while": "WHILE",
+        "true": "TRUE", "false": "FALSE", "null": "NULL",
     }
 
     SYMBOLS_MAP = {
-        # многосимвольные операторы
         '>>>=': 'URSHIFT_ASSIGN', '>>=': 'RSHIFT_ASSIGN', '<<=': 'LSHIFT_ASSIGN',
+        '>>>': 'URSHIFT', '>>': 'RSHIFT', '<<': 'LSHIFT',
         '==': 'EQUAL', '<=': 'LE', '>=': 'GE', '!=': 'NOTEQUAL',
         '&&': 'AND', '||': 'OR', '++': 'INC', '--': 'DEC',
         '+=': 'ADD_ASSIGN', '-=': 'SUB_ASSIGN', '*=': 'MUL_ASSIGN', '/=': 'DIV_ASSIGN',
         '&=': 'AND_ASSIGN', '|=': 'OR_ASSIGN', '^=': 'XOR_ASSIGN', '%=': 'MOD_ASSIGN',
         '->': 'ARROW', '::': 'COLONCOLON', '...': 'ELLIPSIS',
 
-        # односимвольные символы
         '{': 'LBRACE', '}': 'RBRACE', '(': 'LPAREN', ')': 'RPAREN',
         '[': 'LBRACK', ']': 'RBRACK', ';': 'SEMI', ',': 'COMMA', '.': 'DOT',
         '=': 'ASSIGN', '>': 'GT', '<': 'LT', '!': 'BANG', '~': 'TILDE',
@@ -41,24 +41,18 @@ class JavaGrammarLexer(Lexer):
 
     def __init__(self, input_stream):
         super().__init__(input_stream)
-        # исходный код как строка
         self._code = input_stream.strdata
         self._length = len(self._code)
-        # текущая позиция в строке
         self._pos = 0
-        # синхронизируем индекс базового Lexer (если кто-то его использует)
-        self._index = 0
+        self._index = 0  # индекс базового Lexer
 
-        # Компилируем регулярки один раз
-        # порядок проверки: комментарии -> строки/char -> числа -> идентификатор -> символы -> unknown
         self._whitespace_re = re.compile(r'[ \t\r\n]+')
         self._comment_re = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/')
         self._string_re = re.compile(r'"(?:\\.|[^"\\])*"')
         self._char_re = re.compile(r"'(?:\\.|[^'\\])'")
-        self._number_re = re.compile(r'\d+(?:\.\d+)?(?:[eE][+-]?\d+)?')
-        self._identifier_re = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+        self._number_re = re.compile(r'(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?[fFdDlL]?')
+        self._identifier_re = re.compile(r'[A-Za-z_$][A-Za-z0-9_$]*')
 
-        # символы: собираем из словаря, сортируем по длине (чтобы длинные в приоритете)
         sym_keys = sorted(self.SYMBOLS_MAP.keys(), key=lambda x: -len(x))
         sym_pattern = '|'.join(re.escape(s) for s in sym_keys)
         self._symbol_re = re.compile(sym_pattern)
@@ -70,7 +64,6 @@ class JavaGrammarLexer(Lexer):
         self._index += length
 
         if '\n' in text_segment:
-            # если были переводы строки — увеличим строку и посчитаем новую колонку
             parts = text_segment.split('\n')
             self._line += len(parts) - 1
             self._column = len(parts[-1])
@@ -84,31 +77,19 @@ class JavaGrammarLexer(Lexer):
 
             text = self._code[self._pos:]
 
-            # 1) Пробелы / переводы строк — пропускаем
+            # 1) Пробелы / переводы строк - пропускаем
             m = self._whitespace_re.match(text)
             if m:
                 value = m.group(0)
                 self._advance_position(value)
-                continue  # ищем следующий токен
+                continue
 
-            # 2) Комментарии (однострочные и многострочные) — помечаем HIDDEN
+            # 2) Комментарии (однострочные и многострочные) - просто пропускаем
             m = self._comment_re.match(text)
             if m:
                 value = m.group(0)
-                start = self._index
-                stop = start + len(value) - 1
-                tok = self._factory.create(
-                    (self, self._input),
-                    'COMMENT',
-                    value,
-                    Token.HIDDEN_CHANNEL,
-                    start,
-                    stop,
-                    self._line,
-                    self._column
-                )
                 self._advance_position(value)
-                return tok
+                continue
 
             # 3) Строковый литерал
             m = self._string_re.match(text)
@@ -130,7 +111,7 @@ class JavaGrammarLexer(Lexer):
                 self._advance_position(value)
                 return tok
 
-            # 5) Числа (integer / float)
+            # 5) Числа
             m = self._number_re.match(text)
             if m:
                 value = m.group(0)
@@ -162,8 +143,7 @@ class JavaGrammarLexer(Lexer):
                 self._advance_position(value)
                 return tok
 
-            # 8) Нераспознанный символ — возвращаем как UNKNOWN
-            #    (чтобы лексер не зацикливался, съедаем 1 символ)
+            # 8) Нераспознанный символ - возвращаем как UNKNOWN
             value = text[0]
             start = self._index
             stop = start
