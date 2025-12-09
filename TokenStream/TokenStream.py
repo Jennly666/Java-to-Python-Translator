@@ -8,6 +8,8 @@ class TokenStream:
     def _fill_tokens(self):
         while True:
             tok = self.lexer.nextToken()
+            if getattr(tok, "channel", 0) == 1:  # Token.HIDDEN_CHANNEL
+                continue
             self.tokens.append(tok)
             if tok.type == tok.EOF:
                 break
