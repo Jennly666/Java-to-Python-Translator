@@ -8,6 +8,8 @@ from JavaGrammarLexer.JavaGrammarLexer import JavaGrammarLexer
 from TokenStream.TokenStream import TokenStream
 from SimpleJavaParser.SimpleJavaParser import SimpleJavaParser, ASTNode
 from Translator.Translator import Translator, INDENT_STR
+from SemanticAnalyzer import SemanticAnalyzer, SemanticError
+from AstOptimizer import AstOptimizer
 
 
 def _read_uploaded_bytes_as_text(uploaded_file) -> str:
@@ -22,7 +24,7 @@ def _read_uploaded_bytes_as_text(uploaded_file) -> str:
     return raw.decode("latin-1", errors="replace")
 
 
-def translate_java_to_python(java_code: str, indent: str = INDENT_STR) -> tuple[str, ASTNode]:
+def translate_java_to_python(java_code: str, indent: str = INDENT_STR) -> tuple[str, ASTNode, list]:
     if not java_code or "class" not in java_code:
         raise ValueError("В коде не найдено объявление класса (ключевое слово 'class').")
 
@@ -37,9 +39,13 @@ def translate_java_to_python(java_code: str, indent: str = INDENT_STR) -> tuple[
         parser = SimpleJavaParser(tokens)
         ast = parser.parse()
 
+        sem = SemanticAnalyzer()
+        sem_errors = sem.analyze(ast) or []
+
         t = Translator(indent_str=indent)
         python_code = t.translate(ast)
-        return python_code, ast
+
+        return python_code, ast, sem_errors
     finally:
         try:
             tmp_path.unlink(missing_ok=True)
@@ -82,6 +88,8 @@ if "ast_repr" not in st.session_state:
 if "last_error" not in st.session_state:
     st.session_state.last_error = ""
 
+if "sem_errors" not in st.session_state:
+    st.session_state.sem_errors = []
 
 with st.sidebar:
     st.subheader("Настройки")
@@ -141,17 +149,24 @@ with col_left:
 
     if run:
         st.session_state.last_error = ""
+        st.session_state.sem_errors = []
         try:
-            py_code, ast = translate_java_to_python(st.session_state.java_code, indent=indent_str)
+            py_code, ast, sem_errors = translate_java_to_python(
+                st.session_state.java_code,
+                indent=indent_str,
+            )
             st.session_state.python_code = py_code
             st.session_state.show_result = True
             st.session_state.ast_repr = ast.__repr__() if show_ast and ast is not None else ""
-            st.success("✅ Success!")
+            st.session_state.sem_errors = sem_errors
+            st.success("✅ Перевод выполнен")
         except Exception as e:
             st.session_state.last_error = str(e)
             st.session_state.show_result = False
             st.session_state.python_code = ""
             st.session_state.ast_repr = ""
+            st.session_state.sem_errors = []
+
 
     if st.session_state.show_result and st.session_state.python_code:
         st.subheader("Python:")
@@ -162,8 +177,17 @@ with col_left:
             data=st.session_state.python_code,
             file_name="translated.py",
             mime="text/x-python",
-            use_container_width=True,
+            use_container_width=True
         )
+
+        if st.session_state.sem_errors:
+            st.subheader("Семантический анализ")
+            st.warning("Найдены семантические ошибки:")
+            for err in st.session_state.sem_errors:
+                st.write(f"• {err}")
+        else:
+            st.subheader("Семантический анализ:")
+            st.info("Семантических ошибок не обнаружено.")
 
         if show_ast and st.session_state.ast_repr:
             with st.expander("AST (debug)", expanded=False):
