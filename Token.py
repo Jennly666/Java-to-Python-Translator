@@ -72,11 +72,12 @@ class CommonToken(Token):
         input_stream = self.getInputStream()
         if input_stream is None:
             return None
+        if self.start is None or self.stop is None:
+            return None
         n = input_stream.size
-        if self.start < n and self.stop < n:
+        if 0 <= self.start < n and 0 <= self.stop < n:
             return input_stream.getText(self.start, self.stop)
-        else:
-            return "<EOF>"
+        return "<EOF>"
 
     @text.setter
     def text(self, text: Optional[str]) -> None:
